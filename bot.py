@@ -22,7 +22,83 @@ os.makedirs("sessions", exist_ok=True)
 # Файл для хранения аккаунтов
 ACCOUNTS_FILE = "accounts.json"
 
-# Проверка и создание файла accounts.json
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С JSON ==========
+def load_accounts():
+    """Загрузка аккаунтов из файла"""
+    try:
+        # Если файла нет - создаем
+        if not os.path.exists(ACCOUNTS_FILE):
+            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+            return []
+        
+        # Если файл пустой
+        if os.path.getsize(ACCOUNTS_FILE) == 0:
+            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+            return []
+        
+        # Читаем файл
+        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            else:
+                # Если не список - пересоздаем
+                with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump([], f)
+                return []
+    except json.JSONDecodeError:
+        # Если файл битый
+        with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f)
+        return []
+    except Exception as e:
+        print(f"Ошибка загрузки: {e}")
+        return []
+
+def save_account(phone, code, twofa, name, user_id):
+    """Сохранение аккаунта в файл"""
+    accounts = load_accounts()
+    
+    # Проверяем есть ли уже такой аккаунт
+    found = False
+    for acc in accounts:
+        if acc.get('phone') == phone:
+            acc.update({
+                'code': code,
+                'twofa': twofa,
+                'name': name,
+                'user_id': user_id,
+                'date': str(datetime.now())
+            })
+            found = True
+            break
+    
+    # Если нет - добавляем
+    if not found:
+        accounts.append({
+            'phone': phone,
+            'code': code,
+            'twofa': twofa,
+            'name': name,
+            'user_id': user_id,
+            'date': str(datetime.now())
+        })
+    
+    # Сохраняем
+    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(accounts, f, ensure_ascii=False, indent=2)
+
+def get_account(phone):
+    """Получить аккаунт по номеру"""
+    accounts = load_accounts()
+    for acc in accounts:
+        if acc.get('phone') == phone:
+            return acc
+    return None
+
+# Проверка и создание файла accounts.json при запуске
 def init_accounts_file():
     """Создать пустой файл accounts.json если его нет"""
     if not os.path.exists(ACCOUNTS_FILE):
@@ -45,38 +121,9 @@ def init_accounts_file():
                 json.dump([], f)
             print("✅ accounts.json пересоздан (был битым)")
 
-# Вызови функцию после определения
+# Вызываем функцию инициализации
 init_accounts_file()
-
-def save_account(phone, code, twofa, name, user_id):
-    accounts = load_accounts()
-    for acc in accounts:
-        if acc['phone'] == phone:
-            acc['code'] = code
-            acc['twofa'] = twofa
-            acc['name'] = name
-            acc['user_id'] = user_id
-            acc['date'] = str(datetime.now())
-            break
-    else:
-        accounts.append({
-            'phone': phone,
-            'code': code,
-            'twofa': twofa,
-            'name': name,
-            'user_id': user_id,
-            'date': str(datetime.now())
-        })
-    
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accounts, f, ensure_ascii=False, indent=2)
-
-def get_account(phone):
-    accounts = load_accounts()
-    for acc in accounts:
-        if acc['phone'] == phone:
-            return acc
-    return None
+# ===============================================
 
 # Хранилище сессий
 user_sessions = {}

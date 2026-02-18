@@ -11,9 +11,9 @@ import re
 logging.basicConfig(level=logging.ERROR)
 
 # ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "8496943952:AAHOpOKYJ98iCzp98Kanc0ajoBaknkisBoY"
-API_ID = 31402653
-API_HASH = "b09dbee774eb668502455f76d4710bba"
+BOT_TOKEN = "8231777745:AAEJ-oYZzJj5o409hW7fMqrq-Ub_TbbJWLU"
+API_ID = 29563888
+API_HASH = "02808341c4eaddf718422db211d425cf"
 ADMIN_ID = 7546928092
 # ================================
 
